@@ -14,9 +14,9 @@ double LCount = 0;
 double RCount = 0;
 
 // Position setup
-double prevFCount;
-double prevLCount;
-double prevRCount;
+double prevFCount = 0;
+double prevLCount = 0;
+double prevRCount = 0;
 
 double dF;
 double dL;
