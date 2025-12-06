@@ -1,88 +1,75 @@
 // Teensy / Arduino
 #define TEENSY 13
+
 // Encoder Setup
 #define offset 0.200
-#define T 0.200
-#define R 0.125
+#define T      0.200
+#define R      0.125
+
+
+#include <Encoder.h>
 Encoder FEnc(5, 6);
 Encoder LEnc(7, 8);
 Encoder REnc(9, 10);
 
-double FCount = 0;
-double LCount = 0;
-double RCount = 0;
+long FCount = 0, LCount = 0, RCount = 0;
+long prevFCount = 0, prevLCount = 0, prevRCount = 0;
+double dF, dL, dR;
 double CPR = 8192;
 
-// Position setup
-double prevFCount = 0;
-double prevLCount = 0;
-double prevRCount = 0;
+// Position
+double xPosition = 0, yPosition = 0, thetaPosition = 0;
+double delX, delY, delTheta;
+double changeInX, changeInY, changeInTheta;
 
-double dF;
-double dL;
-double dR;
 
-double xPosition;
-double yPosition;
-double thetaPosition;
-
-double midTheta;
-double delX;
-double delY;
-double delTheta;
-double meanEncCount;
-double thetaMid;
-double changeInX;
-double changeInY;
-double changeInTheta;
-
-// BTS Setup
+// BTS7960 Motor Setup
 #include <BTS7960.h>
 #define maxPWM 50
-// Add proper pins for PWM and enable according to board of choice
-// Directly add the PWM and enable pins when declaring the object
+
 BTS7960 FW(12, 11);
 BTS7960 LW(9, 10);
 BTS7960 RW(5, 6);
 
+// Constants for wheel equations
+#define sqrt3by2     0.8660254038
+#define minus1by2   -0.5000
+#define constVector  1
+#define L            1
 
-// #define rad 0.55 // radius of the wheels
-// #define constVector 0.70710  // 1/sqrt(2)
-// #define constVector 1.28564
-#define sqrt3by2 0.8660254038
-#define minus1by2 -0.5000
-#define constVector 1
-#define L 1  // net-length (lx+ly)
-// #define buffer 10
-// #define constVector 1
-#define arraySize 4  // LX  LY  L2  R2
-int8_t receivedData[arraySize] = { 0 };
+// PS4 data
+#define arraySize 4
+int8_t receivedData[arraySize] = {0};
 
-// Navigation Variables
 int16_t wFW = 0, wLW = 0, wRW = 0;
-int16_t Vx = 0, Vy = 0;
-int16_t VxG = 0, VyG = 0;
-int16_t omega = 0;
+int16_t Vx = 0, Vy = 0, VxG = 0, VyG = 0, omega = 0;
 
-// //PID
-float currentTime = 0;
-float previousTime = 0;
-float error = 0;
-float previousError = 0;
-float derivative = 0;
-float kp = 8.0;
-float kd = 68;
-float PID = 0;
-int targetAngle = 0;
+// PID variables
+double currentAngularTime = 0, previousAngularTime = 0;
+double angularError = 0, previousAngularError = 0;
+double angularDerivative = 0;
+double angularKp = 8.0, angularDd = 68;
+double angularPID = 0;
+double targetAngle = 0;
 
-// BNO
+// Linear PID
+double linearKd, linearKp;
+double linearDerivative;
+double xTargetPosition = 0, yTargetPosition = 0;
+double xPositionError = 0, yPositionError = 0;
+double xPrevError = 0, yPrevError = 0;
+double xCorrection = 0, yCorrection = 0;
+
+
+// BNO055 IMU Setup
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
+
 #define PI 3.1415962
 int currentAngle = 0;
 
-Adafruit_BNO055 bno = Adafruit_BNO055();
+Adafruit_BNO055 bno = Adafruit_BNO055(); 
 
 void setup() {
   Serial.begin(115200);
@@ -119,6 +106,7 @@ void loop() {
   VxG = 0, VyG = 0;
   omega = 0;
 
+  //Encoder Readings
   FCount = FEnc.read();
   LCount = LEnc.read();
   RCount = REnc.read();
@@ -133,10 +121,12 @@ void loop() {
   dL = LCount - prevLCount;
   dR = RCount - prevRCount;
 
+  // Odometry calculations
   meanEncCount = (dL + dR)/2;
   delX = (dF/CPR) *2 * PI * R;
   delY = (meanEncCount/CPR) * 2 * PI * R;
   delTheta = (dR - dL) * (2 * PI * R)/(CPR * T);
+
   midTheta  = trueTheta + (delTheta/2);
   delX = delX + (delTheta * offset);
 
@@ -145,10 +135,10 @@ void loop() {
   changeInY = delX * sin(midTheta) + delY * cos(midTheta);
   changeInTheta = delTheta;
 
+  // Final position
   xPosition = xPosition + changeInX;
   yPosition = yPosition + changeInY;
   thetaPosition = thetaPosition + changeInTheta;
-
   receivePS4();
 
   //Global Calculations
@@ -163,25 +153,34 @@ void loop() {
     if (error > 180) error -= 360;
     if (error < -180) error += 360;
 
-    // currentTime = millis();
-    // int deltaT = (currentTime - previousTime);
-    // if (deltaT <= 0) {
-    //   deltaT = 1;
-    // }
-    // derivative = (error - previousError) / (deltaT);
-    // PID = kp * error + kd * derivative;
+    omega = AngularPIDControl(error);
 
-    // PID = constrain(PID, -maxPWM, maxPWM);
-    // if (abs(PID) <= 1) {
-    //   PID = 0;
-    // }
-    omega = PIDControl(error);
     previousError = error;
     previousTime = currentTime;
   } 
   // else {
   //   targetAngle = currentAngle;
   // }
+
+  //Linear PID
+  xPositionError = xTargetPosition - xPosition;
+  yPositionError = yTargetPosition - yPosition;
+
+  if(abs(xPositionError) < 0.05){
+    xCorrection = LinearPIDControl(xPositionError);
+  } else{
+    xTargetPosition = xPosition;
+  }
+
+  if(abs(yPositionError) < 0.05){
+    yCorrection = LinearPIDControl(yPositionError);
+  } else{
+    yTargetPosition = yPosition;
+  }
+
+  //Adding correction to velocities
+  VxG = VxG + xCorrection;
+  VyG = VyG + yCorrection;
 
   // Front wheel (120d)
   wFW = constrain(constVector * (VxG*(minus1by2) + VyG*(sqrt3by2) + omega), -maxPWM, maxPWM);
@@ -225,21 +224,40 @@ void receivePS4() {
   }
 }
 
-float PIDControl(int error) {
-  currentTime = millis();
-  int deltaT = (currentTime - previousTime);
+float AngularPIDControl(int error) {
+  currentAngularTime = millis();
+  int deltaT = (currentAngularTime - previousAngularTime);
   if (deltaT <= 0) {
     deltaT = 1;
   }
-  derivative = (error - previousError) / (deltaT);
-  PID = kp * error + kd * derivative;
-  previousError = error;
-  previousTime = currentTime;
-  PID = constrain(PID, -maxPWM, maxPWM);
-  if (abs(PID) <= 1) {
+  angularDerivative = (AngularError - previousAngularError) / (deltaT);
+  angularPID = angularKp * error + angularKd * angularDerivative;
+  previousAngularError = Angularerror;
+  previousAngularTime = currentAngularTime;
+  angularPID = constrain(PID, -maxPWM, maxPWM);
+  if (abs(angularPID) <= 1) {
+    angularPID = 0;
+  }
+  return angularPID;
+}
+
+double LinearPIDControl(int error) {
+  currentLinearTime = millis();
+  int deltaT = (currentLinearTime - previousLinearTime);
+  if (deltaT <= 0) {
+    deltaT = 1;
+  }
+  linearDerivative = (linearError - previousLinearError) / (deltaT);
+  linearPID = linearKp * linearError + d * linearDerivative;
+
+  previousLinearError = linearError;
+  previousLinearTime = currentLinearTime;
+  
+  linearPID = constrain(linearPID, -maxPWM, maxPWM);
+  if (abs(linearPID) <= 1) {
     PID = 0;
   }
-  return PID;
+  return linearPID;
 }
 
 // void printPS() {
