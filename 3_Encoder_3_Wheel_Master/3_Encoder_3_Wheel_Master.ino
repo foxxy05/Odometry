@@ -1,267 +1,227 @@
 // Teensy / Arduino
+#include <Wire.h>
+#define slaveAddr 0X08
+#define dataBuffer 10
+
 #define TEENSY 13
-// Encoder Setup
-#define offset 0.200
-#define T 0.200
-#define R 0.125
+#include <math.h>
+#include <Encoder.h>
+#include <BTS7960.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+
+// CONSTANTS 
+#define perpendicularOffset         0.200
+#define parallelOffset              0.200
+#define wheelRadius                 0.075
+#define maxPWM                      50
+#define PI                          3.1415962
+
+#define sqrt3by2                    0.8660254038
+#define minus1by2                  -0.5000
+#define constVector                 1
+#define L                           1
+
+#define arraySize 4
+
+// ENCODERS 
 Encoder FEnc(5, 6);
 Encoder LEnc(7, 8);
 Encoder REnc(9, 10);
 
-double FCount = 0;
-double LCount = 0;
-double RCount = 0;
-double CPR = 8192;
+double CPR = 8192.0;
 
-// Position setup
-double prevFCount = 0;
-double prevLCount = 0;
-double prevRCount = 0;
+double FCount = 0, LCount = 0, RCount = 0;
+double prevFCount = 0, prevLCount = 0, prevRCount = 0;
+double dF, dL, dR;
 
-double dF;
-double dL;
-double dR;
+// POSITION 
+double xPosition = 0;
+double yPosition = 0;
+double thetaPosition = 0;
 
-double xPosition;
-double yPosition;
-double thetaPosition;
+double deltaX, deltaY;
+double deltaX_global, deltaY_global;
 
-double midTheta;
-double delX;
-double delY;
-double delTheta;
-double meanEncCount;
-double thetaMid;
-double changeInX;
-double changeInY;
-double changeInTheta;
+double prevTheta = 0;   // IMU previous heading
 
-// BTS Setup
-#include <BTS7960.h>
-#define maxPWM 50
-// Add proper pins for PWM and enable according to board of choice
-// Directly add the PWM and enable pins when declaring the object
+// MOTORS 
 BTS7960 FW(12, 11);
 BTS7960 LW(9, 10);
 BTS7960 RW(5, 6);
 
-
-// #define rad 0.55 // radius of the wheels
-// #define constVector 0.70710  // 1/sqrt(2)
-// #define constVector 1.28564
-#define sqrt3by2 0.8660254038
-#define minus1by2 -0.5000
-#define constVector 1
-#define L 1  // net-length (lx+ly)
-// #define buffer 10
-// #define constVector 1
-#define arraySize 4  // LX  LY  L2  R2
-int8_t receivedData[arraySize] = { 0 };
-
-// Navigation Variables
 int16_t wFW = 0, wLW = 0, wRW = 0;
 int16_t Vx = 0, Vy = 0;
 int16_t VxG = 0, VyG = 0;
 int16_t omega = 0;
 
-// //PID
-float currentTime = 0;
-float previousTime = 0;
-float error = 0;
-float previousError = 0;
+// PS4 
+int8_t receivedData[arraySize] = {0};
+
+// PID 
+unsigned long currentTime = 0, previousTime = 0;
+float error = 0, previousError = 0;
 float derivative = 0;
 float kp = 8.0;
 float kd = 68;
 float PID = 0;
-int targetAngle = 0;
 
-// BNO
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BNO055.h>
-#include <utility/imumaths.h>
-#define PI 3.1415962
+//  IMU 
+Adafruit_BNO055 bno = Adafruit_BNO055();
+int targetAngle = 0;
 int currentAngle = 0;
 
-Adafruit_BNO055 bno = Adafruit_BNO055();
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("I2C Master Ready!");
   pinMode(TEENSY, OUTPUT);
   digitalWrite(TEENSY, HIGH);
 
-  // Setting-up UART communication between ESP32 and Arduino
-  Serial1.begin(9600);
-  Serial.println("UART1 is active!");
+  // Setting-up I communication between ESP32 and Arduino
+  Wire2.begin();
+  Serial.println("I2C Master Ready!");
 
-  // Setting the enable as HIGH for each BTS
   FW.setEnable(true);
   LW.setEnable(true);
   RW.setEnable(true);
 
-  // Initiating BNO and setting extCrystal as true
   if (!bno.begin()) {
-    // Serial.print("No BNO055 detected");
-    bno.setExtCrystalUse(true);
-    while (1)
-      ;
+    while (1);
   }
+  bno.setExtCrystalUse(true);
   delay(1000);
+
+  // Initialize encoder reference
+  prevFCount = FEnc.read();
+  prevLCount = LEnc.read();
+  prevRCount = REnc.read();
+
+  // Initialize IMU reference
+  imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+  prevTheta = euler.x() * PI / 180.0;
+  thetaPosition = prevTheta;
+  previousTime = millis();
 }
+
+// =============================================================
 
 void loop() {
   imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
-  currentAngle = 0;
-  wFW = 0;
-  wLW = 0;
-  wRW = 0;
-  Vx = 0, Vy = 0;
-  VxG = 0, VyG = 0;
-  omega = 0;
+  currentAngle = euler.x();
 
+  double trueTheta = currentAngle * PI / 180.0;
+
+  // IMU DELTA THETA 
+  double delTheta = trueTheta - prevTheta;
+
+  if (delTheta > PI)  delTheta -= 2 * PI;
+  if (delTheta < -PI) delTheta += 2 * PI;
+
+  double midTheta = prevTheta + ( delTheta / 2.0 );
+
+  // ENCODER READ 
   FCount = FEnc.read();
   LCount = LEnc.read();
   RCount = REnc.read();
 
-  currentAngle = euler.x();
-  Serial.println(currentAngle);
-  float theta = currentAngle * PI / 180.0;
-  double trueTheta = theta;
-
-  //Encoder calculations
   dF = FCount - prevFCount;
   dL = LCount - prevLCount;
   dR = RCount - prevRCount;
 
-  meanEncCount = (dL + dR)/2;
-  delX = (dF/CPR) *2 * PI * R;
-  delY = (meanEncCount/CPR) * 2 * PI * R;
-  delTheta = (dR - dL) * (2 * PI * R)/(CPR * T);
-  midTheta  = trueTheta + (delTheta/2);
-  delX = delX + (delTheta * offset);
+  // TRANSLATION 
+  deltaX = (dF / CPR) * 2 * PI * wheelRadius;
+  deltaY = (((dL + dR) / 2.0 )/ CPR) * 2 * PI * wheelRadius;
 
-  // Global coordinates
-  changeInX = delX * cos(midTheta) - delY * sin(midTheta);
-  changeInY = delX * sin(midTheta) + delY * cos(midTheta);
-  changeInTheta = delTheta;
+  deltaX += delTheta * perpendicularOffset;
+  deltaY -= delTheta * parallelOffset;
 
-  xPosition = xPosition + changeInX;
-  yPosition = yPosition + changeInY;
-  thetaPosition = thetaPosition + changeInTheta;
+  // GLOBAL TRANSFORM 
+  deltaX_global= deltaX * cos(midTheta) - deltaY * sin(midTheta);
+  deltaY_global = deltaX * sin(midTheta) + deltaY * cos(midTheta);
 
+  xPosition += deltaX_global;
+  yPosition += deltaY_global;
+  thetaPosition = trueTheta;
+
+  // PS4 
   receivePS4();
 
-  //Global Calculations
-  Vy = receivedData[0];  //Y-Component of the Joystick is the X component of the Chassis
+  Vy = receivedData[0];
   Vx = receivedData[1];
   omega = receivedData[2] - receivedData[3];
-  VxG = Vx * cos(-theta) - Vy * sin(-theta);  // Local X
-  VyG = Vx * sin(-theta) + Vy * cos(-theta);  // Local Y
 
-  if (abs(omega) < 10) {
+  VxG = Vx * cos(-thetaPosition) - Vy * sin(-thetaPosition);
+  VyG = Vx * sin(-thetaPosition) + Vy * cos(-thetaPosition);
+
+  // ANGULAR HOLD 
+  if (abs(omega) < 3) {
+
     error = currentAngle - targetAngle;
-    if (error > 180) error -= 360;
+    if (error >= 180) error -= 360;
     if (error < -180) error += 360;
 
-    // currentTime = millis();
-    // int deltaT = (currentTime - previousTime);
-    // if (deltaT <= 0) {
-    //   deltaT = 1;
-    // }
-    // derivative = (error - previousError) / (deltaT);
-    // PID = kp * error + kd * derivative;
+    if (fabs(error) < 2) {
+      omega = 0;
+    } else {
+      omega = -PIDControl(error);
+    }
 
-    // PID = constrain(PID, -maxPWM, maxPWM);
-    // if (abs(PID) <= 1) {
-    //   PID = 0;
-    // }
-    omega = PIDControl(error);
-    previousError = error;
-    previousTime = currentTime;
-  } 
-  // else {
-  //   targetAngle = currentAngle;
-  // }
+  } else {
+    targetAngle = currentAngle;
+  }
 
-  // Front wheel (120d)
+  // WHEEL EQUATIONS 
   wFW = constrain(constVector * (VxG*(minus1by2) + VyG*(sqrt3by2) + omega), -maxPWM, maxPWM);
-  // Left Wheel (240d)
   wLW = constrain(constVector * (VxG*(minus1by2) - VyG*(sqrt3by2) + omega), -maxPWM, maxPWM);
-  // Right Wheel (0d)
-  wRW = constrain(constVector * (VxG - VyG*(0) + omega), -maxPWM, maxPWM);
+  wRW = constrain(constVector * (VxG + omega), -maxPWM, maxPWM);
 
-  // Sending equation's values to BTS
   FW.rotate(wFW);
   RW.rotate(wRW);
   LW.rotate(wLW);
 
+  // UPDATE PREVIOUS 
   prevFCount = FCount;
   prevLCount = LCount;
   prevRCount = RCount;
-  // targetAngle = currentAngle;
-  // printEq();
-  // printPS();
-  // delay(10);
+  prevTheta  = trueTheta;
 }
+
 
 void receivePS4() {
-  static bool receiving = false;
-  static int index = 0;
+  Wire2.requestFrom(slaveAddr, sizeof(receivedData));
 
-  while (Serial1.available()) {
-    uint8_t b = Serial1.read();
+  int i = 0;
+  while (Wire2.available()) {
+    uint8_t raw = Wire2.read();
+    if (i == 0) receivedData[0] = map(raw, 0, 255, -127, 127);       // LX
+    else if (i == 1) receivedData[1] = map(raw, 0, 255, -127, 127);  // LY
+    else if (i == 2) receivedData[2] = map(raw, 0, 255, 0, -127);    // L2
+    else if (i == 3) receivedData[3] = map(raw, 0, 255, 0, 127);     // R2
 
-    if (b == 0xFF) {  // Start marker
-      receiving = true;
-      index = 0;
-    } else if (b == 0xFE && receiving) {  // End marker
-      if (index == arraySize) {
-        // receivedData[] now has LX, LY, L2, R2
-      }
-      receiving = false;
-    } else if (receiving && index < arraySize) {
-      receivedData[index++] = (int8_t)b;  // store byte
-    }
+    i++;
   }
+
+  if (abs(receivedData[0]) < dataBuffer) receivedData[0] = 0;
+  if (abs(receivedData[1]) < dataBuffer) receivedData[1] = 0;
+  if (abs(receivedData[2]) < dataBuffer) receivedData[2] = 0;
+  if (abs(receivedData[3]) < dataBuffer) receivedData[3] = 0;
 }
 
-float PIDControl(int error) {
+
+float PIDControl(float error) {
   currentTime = millis();
-  int deltaT = (currentTime - previousTime);
-  if (deltaT <= 0) {
-    deltaT = 1;
-  }
-  derivative = (error - previousError) / (deltaT);
+  float deltaT = (currentTime - previousTime) / 1000.0;
+  if (deltaT <= 0) deltaT = 0.001;
+
+  derivative = (error - previousError) / deltaT;
   PID = kp * error + kd * derivative;
+
   previousError = error;
   previousTime = currentTime;
+
   PID = constrain(PID, -maxPWM, maxPWM);
-  if (abs(PID) <= 1) {
-    PID = 0;
-  }
+  if (fabs(PID) <= 1) PID = 0;
+
   return PID;
 }
-
-// void printPS() {
-//   Serial.print("LX : ");
-//   Serial.print(receivedData[0]);
-//   Serial.print("   ||   LY : ");
-//   Serial.print(receivedData[1]);
-//   Serial.print("   ||   L2 : ");
-//   Serial.print(receivedData[2]);
-//   Serial.print("   ||   R2 : ");
-//   Serial.println(receivedData[3]);
-// }
-
-// void printEq() {
-//   Serial.print("ANGLE : ");
-//   Serial.print(currentAngle);
-//   Serial.print("   ||   wLF : ");
-//   Serial.print(wLF);
-//   Serial.print("   ||   wRF : ");
-//   Serial.print(wRF);
-//   Serial.print("   ||   wLR : ");
-//   Serial.print(wLR);
-//   Serial.print("   ||   wRR : ");
-//   Serial.println(wRR);
-// }
